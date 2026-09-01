@@ -1,0 +1,3 @@
+venv/
+src/__pycache__
+src/mcp_server/__pycache__
