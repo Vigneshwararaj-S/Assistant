@@ -1,0 +1,20 @@
+# torch/torchvision/torchaudio need the CUDA-matched index, not plain pip install --
+# see docs/superpowers/specs/2026-08-29-local-llm-chat-loop-design.md for why.
+# Install these first with:
+#   pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+torch==2.9.1
+torchvision==0.24.1
+torchaudio==2.9.1
+
+transformers==5.16.1
+bitsandbytes==0.50.2
+
+# MCP client/server (tool-calling)
+mcp==2.1.1
+
+# Ollama backend (default)
+ollama==0.6.2
+
+# Web tools (fetch_url)
+requests==2.34.2
+beautifulsoup4==4.15.0
