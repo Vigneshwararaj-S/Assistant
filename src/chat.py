@@ -1,6 +1,8 @@
 import json
 
 MAX_TOOL_HOPS = 4
+CONFIRM_REQUIRED = {"write_file", "delete_file"}
+CONFIRM_PREVIEW_CHARS = 300
 
 
 class Chat:
@@ -117,6 +119,10 @@ class Chat:
             print(f"[unknown tool: {name}] ", end="", flush=True)
             return name, f"There is no tool named '{name}'. Use one of the tools listed above."
 
+        if name in CONFIRM_REQUIRED and not self._confirm(name, arguments):
+            print(f"[skipped: user declined {name}] ", end="", flush=True)
+            return name, "The user declined to run this action. Do not attempt it again unless asked."
+
         print(f"[calling tool: {name}] ", end="", flush=True)
         try:
             result = owner.call_tool(name, arguments)
@@ -126,3 +132,12 @@ class Chat:
         if isinstance(result, dict) and set(result) == {"result"}:
             result = result["result"]
         return name, result
+
+    @staticmethod
+    def _confirm(name: str, arguments: dict) -> bool:
+        print(f"\n[Confirm] About to call '{name}' with:")
+        for key, value in arguments.items():
+            if isinstance(value, str) and len(value) > CONFIRM_PREVIEW_CHARS:
+                value = value[:CONFIRM_PREVIEW_CHARS] + f"...[{len(value) - CONFIRM_PREVIEW_CHARS} more characters]"
+            print(f"    {key}: {value!r}")
+        return input("Proceed? [y/N]: ").strip().lower() == "y"
