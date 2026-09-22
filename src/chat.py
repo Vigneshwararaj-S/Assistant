@@ -1,7 +1,7 @@
 import json
 
 MAX_TOOL_HOPS = 4
-CONFIRM_REQUIRED = {"write_file", "delete_file"}
+CONFIRM_REQUIRED = {"write_file", "delete_file", "launch_app", "close_app"}
 CONFIRM_PREVIEW_CHARS = 300
 
 
