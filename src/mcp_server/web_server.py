@@ -8,8 +8,9 @@ from mcp.server import MCPServer
 
 MAX_FETCH_CHARS = 8000
 TIMEOUT_SECONDS = 10
+SEARXNG_URL = "http://localhost:8080/search"
 
-mcp = MCPServer("WebTools", "0.1.0", "Read-only web page fetching")
+mcp = MCPServer("WebTools", "0.1.0", "Read-only web page fetching and search (via a local SearXNG instance)")
 
 
 def _is_safe_url(url: str) -> tuple[bool, str]:
@@ -57,6 +58,25 @@ def fetch_url(url: str) -> str:
     if len(text) > MAX_FETCH_CHARS:
         text = text[:MAX_FETCH_CHARS] + f"\n...[truncated, {len(text) - MAX_FETCH_CHARS} more characters]"
     return text
+
+
+@mcp.tool()
+def web_search(query: str, max_results: int = 5) -> list[dict]:
+    """Search the web and return the top results (title, url, snippet). Requires a local SearXNG instance running at localhost:8080 (docker container 'searxng')."""
+    try:
+        response = requests.get(SEARXNG_URL, params={"q": query, "format": "json"}, timeout=TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise ValueError(
+            f"Web search failed -- is the local SearXNG container running? "
+            f"(docker start searxng): {e}"
+        )
+
+    data = response.json()
+    return [
+        {"title": item.get("title", ""), "url": item.get("url", ""), "snippet": item.get("content", "")}
+        for item in data.get("results", [])[:max_results]
+    ]
 
 
 if __name__ == "__main__":
