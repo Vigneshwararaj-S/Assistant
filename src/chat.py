@@ -1,22 +1,58 @@
 import json
-import re
 import threading
 from transformers import TextIteratorStreamer
 from model import Model
 
 TOOL_OPEN = "<tool_call>"
 TOOL_CLOSE = "</tool_call>"
+MAX_TOOL_HOPS = 4
+
+
+def _extract_json_objects(text: str) -> list[str]:
+    """Find top-level, brace-balanced {...} substrings in `text`. Unlike a
+    regex like r"\\{[^{}]*\\}", this correctly handles nested objects (e.g.
+    {"name": ..., "arguments": {"path": "src"}}) as a single candidate."""
+    candidates = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "{":
+            depth, start, j = 0, i, i
+            while j < n:
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(text[start:j + 1])
+                        break
+                j += 1
+            i = j + 1
+        else:
+            i += 1
+    return candidates
+
+
+def _overlap_len(text: str, pattern: str) -> int:
+    """Length of the longest suffix of `text` that is a prefix of `pattern`."""
+    for length in range(min(len(text), len(pattern) - 1), 0, -1):
+        if text.endswith(pattern[:length]):
+            return length
+    return 0
 
 
 class Chat:
-    def __init__(self, model_name: str, tool_client, max_new_tokens: int = 256, temperature: float = 0.7):
+    def __init__(self, model_name: str, tool_clients, max_new_tokens: int = 256, temperature: float = 0.7):
         self.model = Model(model_name)
         self.tokenizer = self.model.tokenizer
-        self.tool_client = tool_client
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
 
-        tools = self.tool_client.list_tools()
+        self._tool_owner = {}
+        tools = []
+        for tc in tool_clients:
+            for t in tc.list_tools():
+                self._tool_owner[t.name] = tc
+                tools.append(t)
         self.tool_schemas = [self._to_openai_schema(t) for t in tools]
         self.native_tools = self._supports_native_tools()
 
@@ -30,10 +66,12 @@ class Chat:
                 "If you need to use a tool, respond with EXACTLY this format and "
                 "nothing else:\n"
                 f'{TOOL_OPEN}{{"name": "<tool_name>", "arguments": {{}}}}{TOOL_CLOSE}\n'
-                "Otherwise, answer normally."
+                "You may call a tool more than once in a row if you need another "
+                "one after seeing a result. Otherwise, answer normally."
             )
             self._base_history = [{"role": "system", "content": system_prompt}]
         self.history = list(self._base_history)
+        self._last_call = None
 
     @staticmethod
     def _to_openai_schema(tool):
@@ -78,14 +116,17 @@ class Chat:
             return
 
         self.history.append({"role": "user", "content": prompt})
-
         print("\nAssistant: ", end="")
-        reply = self._generate(expect_tool_call=True)
 
-        if reply.strip().startswith(TOOL_OPEN):
-            name, result = self._handle_tool_call(reply)
+        self._last_call = None  # only suppress repeats within this one turn
+        visible, tool_call_text = self._generate()
+        answer = visible
+        hops = 0
+        while tool_call_text is not None and hops < MAX_TOOL_HOPS:
+            hops += 1
+            name, result = self._handle_tool_call(tool_call_text)
             if self.native_tools:
-                self.history.append({"role": "assistant", "content": reply.strip()})
+                self.history.append({"role": "assistant", "content": tool_call_text.strip()})
                 self.history.append({"role": "tool", "content": str(result)})
             else:
                 label = name or "tool"
@@ -96,27 +137,60 @@ class Chat:
                         "(This is real, current data from the tool. Use it to answer the user's last question.)"
                     ),
                 })
-            reply = self._strip_tool_calls(self._generate(expect_tool_call=False))
+            visible, tool_call_text = self._generate()
+            answer += visible
 
-        self.history.append({"role": "assistant", "content": reply})
+        if tool_call_text is not None:
+            msg = "\n[Stopped after too many tool calls in a row without a final answer.]"
+            print(msg, end="", flush=True)
+            answer += msg
 
-    def _strip_tool_calls(self, text: str) -> str:
-        return re.sub(rf"{TOOL_OPEN}.*?{TOOL_CLOSE}\s*", "", text, flags=re.DOTALL).strip()
+        self.history.append({"role": "assistant", "content": answer})
 
     def _handle_tool_call(self, raw_reply: str):
         """Parse and execute a <tool_call> block. Returns (name, result) on
-        success, or (name_or_None, error_message) on failure — never raises."""
-        match = re.search(rf"{TOOL_OPEN}(.*?)(?:{TOOL_CLOSE}|$)", raw_reply.strip(), re.DOTALL)
-        try:
-            call = json.loads(match.group(1))
-            name = call["name"]
-            arguments = call.get("arguments", {})
-        except (json.JSONDecodeError, KeyError, AttributeError, TypeError) as e:
-            return None, f"Tool call could not be parsed: {e!r}"
+        success, or (name_or_None, error_message) on failure — never raises.
+
+        Searches for the *last* {"name": ...} object in the raw text, not the
+        first-to-only-closing-tag span: a confused model can emit garbled or
+        repeated <tool_call> fragments, with the real intended call at the end.
+        """
+        call = None
+        for candidate in reversed(_extract_json_objects(raw_reply)):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and "name" in parsed:
+                call = parsed
+                break
+
+        if call is None:
+            print("[tool call failed to parse] ", end="", flush=True)
+            return None, (
+                "Your last message could not be understood as a tool call. "
+                'Respond with a single valid tool call: <tool_call>{"name": "...", "arguments": {...}}</tool_call>'
+            )
+        name = call["name"]
+        arguments = call.get("arguments", {})
+
+        key = (name, json.dumps(arguments, sort_keys=True))
+        if key == self._last_call:
+            print(f"[skipping repeated call to {name}] ", end="", flush=True)
+            return name, (
+                "You already called this tool with these exact arguments — see the "
+                "result above. Do not call it again; answer the user's question now."
+            )
+        self._last_call = key
+
+        owner = self._tool_owner.get(name)
+        if owner is None:
+            print(f"[unknown tool: {name}] ", end="", flush=True)
+            return name, f"There is no tool named '{name}'. Use one of the tools listed above."
 
         print(f"[calling tool: {name}] ", end="", flush=True)
         try:
-            result = self.tool_client.call_tool(name, arguments)
+            result = owner.call_tool(name, arguments)
         except Exception as e:
             return name, f"Tool error: {e}"
 
@@ -124,14 +198,15 @@ class Chat:
             result = result["result"]
         return name, result
 
-    def _generate(self, expect_tool_call: bool) -> str:
-        """Generate a reply, streaming it live unless it is a tool call.
+    def _generate(self):
+        """Generate one model turn, scanning the whole stream for a
+        <tool_call> block — not only at the very start, since the model
+        sometimes writes a sentence before deciding to call a tool.
 
-        expect_tool_call=True (first pass): a reply starting with <tool_call> is
-        held back (never printed) and generation stops at the closing tag.
-        expect_tool_call=False (after a tool result): any echoed <tool_call>
-        block is swallowed and the real answer streams live.
-        Returns the raw generated text.
+        Text before any tool call streams live as it's generated. The tool
+        call itself is always hidden, and generation stops right at
+        </tool_call>. Returns (visible_text, tool_call_text); tool_call_text
+        is None if no tool call appeared anywhere in this generation.
         """
         template_kwargs = dict(tokenize=False, add_generation_prompt=True)
         if self.native_tools:
@@ -146,40 +221,41 @@ class Chat:
             max_new_tokens=self.max_new_tokens,
             temperature=self.temperature,
             do_sample=True,
+            stop_strings=[TOOL_CLOSE],
+            tokenizer=self.tokenizer,
         )
-        if expect_tool_call:
-            generation_kwargs.update(stop_strings=[TOOL_CLOSE], tokenizer=self.tokenizer)
-
         thread = threading.Thread(target=self._generate_reply, kwargs=generation_kwargs)
         thread.start()
 
-        state = "deciding"  # deciding -> streaming | tool_call | swallowing
-        pending = ""
-        full_text = ""
+        visible_parts = []
+        buffer = ""       # trailing text that might still become "<tool_call>"
+        hidden = None      # once set, the raw tool-call text (never printed)
 
         for token in streamer:
-            full_text += token
-            if state == "streaming":
-                print(token, end="", flush=True)
+            if hidden is not None:
+                hidden += token
                 continue
 
-            pending += token
-            if state == "deciding":
-                if pending.startswith(TOOL_OPEN):
-                    state = "tool_call" if expect_tool_call else "swallowing"
-                elif TOOL_OPEN.startswith(pending):
-                    continue  # could still turn into a tool call, keep holding
-                else:
-                    state = "streaming"
-                    print(pending, end="", flush=True)
-                    continue
+            buffer += token
+            idx = buffer.find(TOOL_OPEN)
+            if idx != -1:
+                pre = buffer[:idx]
+                if pre:
+                    print(pre, end="", flush=True)
+                    visible_parts.append(pre)
+                hidden = buffer[idx:]
+                buffer = ""
+                continue
 
-            if state == "swallowing" and TOOL_CLOSE in pending:
-                state = "streaming"
-                rest = pending.split(TOOL_CLOSE, 1)[1].lstrip()
-                print(rest, end="", flush=True)
+            keep = _overlap_len(buffer, TOOL_OPEN)
+            if keep < len(buffer):
+                flush = buffer[: len(buffer) - keep]
+                print(flush, end="", flush=True)
+                visible_parts.append(flush)
+                buffer = buffer[len(buffer) - keep:]
 
-        if state == "deciding":
-            print(pending, end="", flush=True)
+        if buffer:
+            print(buffer, end="", flush=True)
+            visible_parts.append(buffer)
 
-        return full_text
+        return "".join(visible_parts), hidden
