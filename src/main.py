@@ -4,11 +4,27 @@ from pathlib import Path
 
 from chat import Chat
 from tool_client import ToolClient
+from backends.transformers_backend import TransformersBackend
+from backends.ollama_backend import OllamaBackend
 
 MCP_SERVER_DIR = Path(__file__).resolve().parent / "mcp_server"
 
+DEFAULT_MODEL_NAME = {
+    "transformers": "Qwen/Qwen2.5-3B-Instruct",
+    "ollama": "qwen2.5:3b",
+}
+
 parser = argparse.ArgumentParser(description="Run the chat application.")
-parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-3B-Instruct", help="Name of the model to load.")
+parser.add_argument(
+    "--backend", type=str, choices=["transformers", "ollama"], default="transformers",
+    help="Which runtime loads and runs the model.",
+)
+parser.add_argument(
+    "--model_name", type=str, default=None,
+    help="Model to load. Defaults per backend: a Hugging Face repo id for "
+         "transformers (e.g. Qwen/Qwen2.5-3B-Instruct), an Ollama tag for "
+         "ollama (e.g. qwen2.5:3b).",
+)
 parser.add_argument("--max_new_tokens", type=int, default=256, help="Maximum number of new tokens to generate.")
 parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling.")
 parser.add_argument("--files_root", type=str, default=".", help="Root directory the filesystem tools may read from.")
@@ -17,6 +33,7 @@ parser.add_argument("--files_root", type=str, default=".", help="Root directory 
 def main():
     sys.stdout.reconfigure(errors="replace")
     args = parser.parse_args()
+    model_name = args.model_name or DEFAULT_MODEL_NAME[args.backend]
 
     servers = [
         [str(MCP_SERVER_DIR / "tools_server.py")],
@@ -33,8 +50,14 @@ def main():
             tc.close()
         return
 
+    print(f"Using backend={args.backend} model={model_name}")
+    if args.backend == "transformers":
+        backend = TransformersBackend(model_name, args.max_new_tokens, args.temperature)
+    else:
+        backend = OllamaBackend(model_name, args.max_new_tokens, args.temperature)
+
     try:
-        chat_app = Chat(args.model_name, tool_clients, args.max_new_tokens, args.temperature)
+        chat_app = Chat(backend, tool_clients)
         while True:
             user_input = input("\nUser: ")
             chat_app.chat(user_input)
