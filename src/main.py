@@ -16,7 +16,7 @@ DEFAULT_MODEL_NAME = {
 
 parser = argparse.ArgumentParser(description="Run the chat application.")
 parser.add_argument(
-    "--backend", type=str, choices=["transformers", "ollama"], default="transformers",
+    "--backend", type=str, choices=["transformers", "ollama"], default="ollama",
     help="Which runtime loads and runs the model.",
 )
 parser.add_argument(
