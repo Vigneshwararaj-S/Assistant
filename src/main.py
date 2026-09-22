@@ -39,6 +39,7 @@ def main():
         [str(MCP_SERVER_DIR / "tools_server.py")],
         [str(MCP_SERVER_DIR / "filesystem_server.py"), args.files_root],
         [str(MCP_SERVER_DIR / "apps_server.py")],
+        [str(MCP_SERVER_DIR / "web_server.py")],
     ]
 
     tool_clients = []
