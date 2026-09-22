@@ -18,7 +18,11 @@ class ToolClient:
         self._session_future = asyncio.run_coroutine_threadsafe(
             self._session_task(server, ready), self._loop
         )
-        ready.wait()
+        while not ready.wait(timeout=0.1):
+            if self._session_future.done():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._session_future.result()
+                raise RuntimeError("MCP session ended before it was ready")
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)

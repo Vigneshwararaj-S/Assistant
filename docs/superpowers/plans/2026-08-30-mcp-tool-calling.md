@@ -49,6 +49,42 @@ request without sacrificing live streaming for normal replies.
 
 ---
 
+## Deviations found during implementation (2026-09-21)
+
+The code snippets in the tasks below are the *original plan*. Real runs exposed
+bugs in several of them; **the source of truth is the code in `src/`**, not the
+snippets. What changed and why:
+
+- **`ToolClient` (Task 2):** the plan's version opened the connection with
+  `__aenter__()` and closed it with a separate `__aexit__()` call, each via its
+  own `run_coroutine_threadsafe` — two different asyncio Tasks. anyio requires
+  a cancel scope to be exited by the same Task that entered it, so `close()`
+  raised `RuntimeError: Attempted to exit cancel scope in a different task`.
+  Fix: one long-lived `_session_task` coroutine holds the whole
+  `async with Client(server)` block and waits on an `asyncio.Event` to shut down.
+  Also: `__init__` originally hung forever if the server failed to start
+  (`ready.wait()` never returned) — it now polls the session future and raises.
+- **Server location:** `src/mcp_server/tools_server.py` (nested under `src/`),
+  not the project-root `mcp_server/` the plan named; `main.py` resolves the path
+  from `__file__`.
+- **`_generate` (Task 3):** the fixed-length lookahead buffer never printed replies
+  shorter than 11 characters, and it hid the *second* pass whenever the model
+  echoed `<tool_call>` again before answering (Phi-3.5 does this). Now: a small
+  state machine (`deciding` / `streaming` / `tool_call` / `swallowing`), the
+  first pass stops at `</tool_call>` via `stop_strings` (the model otherwise
+  rambles after the tag), and the second pass swallows an echoed call.
+- **Tool-result message (Task 3):** the plan's bare `[Tool result for X]: {'result': ...}`
+  gave ~3/6 usable answers on Phi-3.5-mini over 6 trials; unwrapping the value and
+  adding "(This is real, current data from the tool. Use it to answer the user's
+  last question.)" gave 6/6.
+- **`main.py` (Task 4):** `sys.stdout.reconfigure(errors="replace")` added — piped
+  stdout on Windows is cp1252 and crashed on a model-emitted CJK character.
+- **Known small-model limits (not bugs):** Phi-3.5-mini hedges that the tool's date
+  is "hypothetical" (it doubts 2026), and on follow-up questions can imitate the
+  `[Tool result ...]` format and invent a fake result.
+
+---
+
 ## File Structure
 
 - Create: `mcp_server/tools_server.py` — the MCP server, one tool.
